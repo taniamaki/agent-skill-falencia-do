@@ -37,9 +37,10 @@ Padrões: período = **ontem e hoje**; fontes = `dou,djen,doesp`; tribunais = os
 `falencias/` na raiz do projeto atual, para que o acumulado fique sempre no
 mesmo lugar.
 
-A execução completa leva de 5 a 15 minutos, porque o DJEN limita a 20 consultas por minuto
-e o coletor respeita esse limite. Rode em segundo plano (ou com timeout de 10
-min) e avise o usuário que vai demorar. O progresso sai no stderr; o resumo em
+A execução completa (27 TJs, um dia) leva de 10 a 25 minutos, quase tudo
+download: o DJEN limita a 20 consultas por minuto e o coletor respeita esse
+limite. Com `--tribunais` restrito a poucos estados, leva 2 a 3 minutos. Rode em
+segundo plano e avise o usuário que vai demorar. O progresso sai no stderr; o resumo em
 JSON sai no stdout no final.
 
 Opções úteis:
@@ -50,6 +51,7 @@ Opções úteis:
 | `--tribunais TJSP,TJRJ` | Interesse restrito a alguns estados (fica bem mais rápido) |
 | `--tribunais todos` | Incluir também os TRFs (casos com a União como parte) |
 | `--data-inicio AAAA-MM-DD --data-fim AAAA-MM-DD` | Período diferente de ontem/hoje (ex.: segunda-feira cobrindo o fim de semana) |
+| `--desde-ultima` | Execuções agendadas ou "atualize a planilha": começa na data mais recente já gravada e vai até hoje, cobrindo dias em que a coleta não rodou |
 | `--nivel-minimo media` | O usuário quer também as **menções**: processos comuns em que uma das partes está em falência/RJ |
 | `--brutos arq.json` / `--de-brutos arq.json` | Salvar o que foi baixado / reprocessar sem baixar de novo (para ajustar a classificação) |
 
@@ -75,6 +77,11 @@ termos_encontrados, titulo, link, trecho, coletado_em`
   homologação de plano, Assembleia geral de credores, Edital / habilitação de
   créditos, Alienação / leilão de bens da massa, Liquidação extrajudicial, e
   "Outros atos – …" quando é do processo mas sem ato específico identificado.
+  "Decretação" e "Convolação" só são marcadas quando a própria publicação
+  decide ("DECRETO A FALÊNCIA", "fixo o termo legal", "convolo"). Uma decisão
+  que só cita uma falência antiga ("a quebra foi decretada em 2017") fica em
+  "Outros atos – falência". Ainda assim, leia o `trecho` antes de afirmar ao
+  usuário que uma falência foi decretada naquele dia.
 - **relevancia**: `alta` = publicação do próprio caso de insolvência (no DJEN: a
   classe do processo é falência, RJ, habilitação/impugnação de crédito etc.; no
   DOU/DOE: o texto traz um ato ou edital típico). `media` = outro processo que

@@ -16,6 +16,7 @@ Um resumo em JSON é impresso no fim (stdout); o progresso vai para stderr.
 import argparse
 import csv
 import datetime as dt
+import hashlib
 import json
 import os
 import sys
@@ -33,32 +34,76 @@ ARQUIVO = "anuncios_falencia.csv"
 NIVEIS = {"alta": 3, "media": 2, "baixa": 1}
 
 
-def processar(pub, agora):
-    texto = extrair.texto_limpo(pub["texto"])
-    texto_class = " ".join([pub.get("titulo", ""), texto])
-    tipo, relevancia, pos = extrair.classificar(texto_class, pub.get("classe", ""), pub.get("partes"))
-    pos_texto = max(0, pos - len(pub.get("titulo", "")) - 1) if pos >= 0 else -1
-    processos = [pub["numero_processo"]] if pub.get("numero_processo") else extrair.processos(texto)
+# Pautas e editais do DJEN chegam a ter megabytes; a extração de nomes roda só
+# numa janela em volta do trecho que classificou a publicação.
+JANELA_ANTES, JANELA_DEPOIS = 5000, 15000
+
+
+# O DJEN publica o mesmo texto uma vez por destinatário: num dia típico, 7 mil
+# publicações somam ~2 GB mas só ~20 MB de textos distintos. A análise depende só
+# do texto, título, classe e partes, então é guardada e reaproveitada. A limpeza
+# e normalização (o mais caro) dependem só do texto e do título.
+_CACHE = {}
+_TEXTOS = {}
+
+
+def processar(pub, agora, nivel_minimo="baixa"):
+    chave = (hashlib.md5(pub["texto"].encode("utf-8", "replace")).hexdigest(),
+             pub.get("titulo", ""), pub.get("classe", ""), tuple(pub.get("partes") or ()), nivel_minimo)
+    if chave not in _CACHE:
+        _CACHE[chave] = _analisar(pub, nivel_minimo)
+    campos = _CACHE[chave]
+    if "tipo_ato" not in campos:
+        return {"id": pub["id"], "relevancia": campos["relevancia"]}
+    processos = [pub["numero_processo"]] if pub.get("numero_processo") else campos["processos"]
     return {
         "id": pub["id"],
         "fonte": pub["fonte"],
         "esfera": pub["esfera"],
         "diario": pub["diario"],
         "data_publicacao": pub["data_publicacao"],
-        "tipo_ato": tipo,
-        "relevancia": relevancia,
-        "empresa": " | ".join(extrair.empresas(texto, pub.get("partes"))),
-        "cnpj": " | ".join(extrair.cnpjs(texto)),
+        "tipo_ato": campos["tipo_ato"],
+        "relevancia": campos["relevancia"],
+        "empresa": campos["empresa"],
+        "cnpj": campos["cnpj"],
         "numero_processo": " | ".join(processos),
         "vara_orgao": pub.get("orgao", ""),
         "tribunal_uf": pub.get("tribunal_uf", ""),
         "classe_processual": pub.get("classe", ""),
-        "administrador_judicial": extrair.administrador(texto, pub.get("partes")),
-        "termos_encontrados": extrair.termos_encontrados(texto_class),
+        "administrador_judicial": campos["administrador_judicial"],
+        "termos_encontrados": campos["termos_encontrados"],
         "titulo": pub.get("titulo", ""),
         "link": pub.get("link", ""),
-        "trecho": extrair.trecho(texto, pos_texto),
+        "trecho": campos["trecho"],
         "coletado_em": agora,
+    }
+
+
+def _analisar(pub, nivel_minimo):
+    """Classifica a publicação e, se ela atingir `nivel_minimo`, extrai os campos
+    que dependem do texto. Abaixo do nível, devolve só a relevância (a extração é
+    a parte cara)."""
+    chave = (hashlib.md5(pub["texto"].encode("utf-8", "replace")).hexdigest(), pub.get("titulo", ""))
+    if chave not in _TEXTOS:
+        texto = extrair.texto_limpo(pub["texto"])
+        texto_class = " ".join([pub.get("titulo", ""), texto])
+        _TEXTOS[chave] = (texto, texto_class, extrair.texto_classificavel(texto_class))
+    texto, texto_class, norm = _TEXTOS[chave]
+    tipo, relevancia, pos = extrair.classificar(texto_class, pub.get("classe", ""), pub.get("partes"), norm=norm)
+    if NIVEIS[relevancia] < NIVEIS[nivel_minimo]:
+        return {"relevancia": relevancia}
+    pos_texto = max(0, pos - len(pub.get("titulo", "")) - 1) if pos >= 0 else -1
+    ini = max(0, pos_texto - JANELA_ANTES)
+    recorte = texto[ini:max(pos_texto, 0) + JANELA_DEPOIS]
+    return {
+        "tipo_ato": tipo,
+        "relevancia": relevancia,
+        "empresa": " | ".join(extrair.empresas(recorte, pub.get("partes"))),
+        "cnpj": " | ".join(extrair.cnpjs(recorte)),
+        "processos": [] if pub.get("numero_processo") else extrair.processos(recorte),
+        "administrador_judicial": extrair.administrador(recorte, pub.get("partes")),
+        "termos_encontrados": extrair.termos_encontrados(texto_class, norm=norm),
+        "trecho": extrair.trecho(texto, pos_texto),
     }
 
 
@@ -67,6 +112,15 @@ def ler_ids(caminho):
         return set()
     with open(caminho, newline="", encoding="utf-8-sig") as f:
         return {linha["id"] for linha in csv.DictReader(f, delimiter=";")}
+
+
+def ultima_data(caminho):
+    """Data de publicação mais recente já gravada no acumulado (ou None)."""
+    if not os.path.exists(caminho):
+        return None
+    with open(caminho, newline="", encoding="utf-8-sig") as f:
+        datas = [linha["data_publicacao"] for linha in csv.DictReader(f, delimiter=";") if linha["data_publicacao"]]
+    return dt.date.fromisoformat(max(datas)) if datas else None
 
 
 def gravar(caminho, linhas, acrescentar):
@@ -86,6 +140,9 @@ def main():
     ap.add_argument("--fontes", default="dou,djen,doesp", help="lista separada por vírgulas: " + ",".join(fontes.FONTES))
     ap.add_argument("--tribunais", default="", help="siglas do DJEN separadas por vírgula, ou 'todos' (padrão: 27 TJs)")
     ap.add_argument("--saida", default="falencias", help="pasta de saída")
+    ap.add_argument("--desde-ultima", action="store_true",
+                    help="começa na data mais recente já gravada no acumulado (repete esse dia, sem duplicar) "
+                         "em vez de --data-inicio; para execuções agendadas não deixarem buracos")
     ap.add_argument("--brutos", help="salva as publicações baixadas (antes do filtro) neste arquivo .json")
     ap.add_argument("--de-brutos", help="reprocessa um .json salvo com --brutos, sem acessar a internet")
     ap.add_argument("--nivel-minimo", choices=list(NIVEIS), default="alta",
@@ -108,6 +165,8 @@ def main():
 
     os.makedirs(a.saida, exist_ok=True)
     caminho = os.path.join(a.saida, ARQUIVO)
+    if a.desde_ultima:
+        a.data_inicio = min(ultima_data(caminho) or a.data_inicio, a.data_fim)
     ja_gravados = ler_ids(caminho)
     agora = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     falhas, resumo_fontes, novos = [], {}, []
@@ -137,11 +196,9 @@ def main():
         for pub in pubs:
             if pub["data_publicacao"] and not (ini <= pub["data_publicacao"] <= fim):
                 continue
-            linha = processar(pub, agora)
+            linha = processar(pub, agora, a.nivel_minimo)
             cont[linha["relevancia"]] += 1
-            if NIVEIS[linha["relevancia"]] < NIVEIS[a.nivel_minimo]:
-                continue
-            if linha["id"] in ja_gravados:
+            if NIVEIS[linha["relevancia"]] < NIVEIS[a.nivel_minimo] or linha["id"] in ja_gravados:
                 continue
             ja_gravados.add(linha["id"])
             novos.append(linha)

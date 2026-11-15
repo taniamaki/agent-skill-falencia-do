@@ -1,0 +1,7 @@
+schema_version: "1.1"
+name: coleta-dia-falencias-decretadas
+expected_outcome: |
+  Roda o coletor com todas as fontes (DOU, DJEN com os 27 TJs, DOE-SP) só para 30/10/2026,
+  grava o CSV acumulado e o da execução, e responde listando as empresas com
+  falência decretada (empresa, tribunal, processo e link), além de um resumo curto
+  por tipo de ato e eventuais falhas de fonte.

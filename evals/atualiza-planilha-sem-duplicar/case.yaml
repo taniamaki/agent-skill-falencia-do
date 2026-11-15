@@ -1,0 +1,9 @@
+schema_version: "1.1"
+name: atualiza-planilha-sem-duplicar
+expected_outcome: |
+  Usa a pasta da planilha existente como saída, roda a coleta de 30/10/2026 e,
+  como a planilha já contém esse dia, não grava duplicatas: o número de linhas
+  com o mesmo id continua um só, e a resposta informa quantos registros novos
+  entraram (zero ou quase zero) sem apagar o que já existia.
+context:
+  scaffold_script: place-files.sh

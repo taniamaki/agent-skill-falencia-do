@@ -11,6 +11,7 @@ A classificação usa o texto sem acentos e em minúsculas, para tolerar as
 variações de grafia dos diários; a extração de nomes usa o texto original,
 porque depende das maiúsculas.
 """
+import functools
 import html
 import re
 import unicodedata
@@ -30,14 +31,23 @@ def texto_limpo(bruto: str) -> str:
     return t.strip()
 
 
+class _TabelaNormal(dict):
+    """Tabela para str.translate, preenchida sob demanda (um caractere por vez)."""
+
+    def __missing__(self, cod):
+        ch = chr(cod)
+        base = unicodedata.normalize("NFD", ch)[0].lower()
+        self[cod] = base if len(base) == 1 else ch
+        return self[cod]
+
+
+_TABELA_NORMAL = _TabelaNormal()
+
+
 def normalizar(t: str) -> str:
     """Minúsculas e sem acentos, com o mesmo comprimento do texto original, para
     que as posições encontradas aqui sirvam para recortar o texto original."""
-    out = []
-    for ch in t:
-        base = unicodedata.normalize("NFD", ch)[0].lower()
-        out.append(base if len(base) == 1 else ch)
-    return "".join(out)
+    return t.translate(_TABELA_NORMAL)
 
 
 # ---------------------------------------------------------------- classificação
@@ -65,9 +75,14 @@ RUIDO_RE = [re.compile(p) for p in RUIDO]
 # nível "ato"     -> decisão ou fato central do caso (sempre relevante);
 #       "edital"  -> comunicações típicas do processo de insolvência;
 #       "generico"-> só menciona o tema.
+#
+# Convolação e decretação só contam quando o próprio texto decide ("convolo",
+# "decreto a falência", "fixo o termo legal"). Frases como "a quebra foi decretada
+# em 2017" ou "sob pena de convolação em falência" citam decisões antigas ou
+# hipotéticas e caem em "Outros atos – falência".
 TIPOS = [
-    ("Convolação em falência", "ato", r"convol\w*[^.;\n]{0,80}falencia|convolacao da recuperacao"),
-    ("Decretação de falência", "ato", r"decret\w* (a |sua )?(quebra|falencia)|decreto a (quebra|falencia)|(falencia|quebra) (foi )?decretada|sentenca (que )?(decret|declar)\w*[^.;\n]{0,40}falencia|declar\w* (a )?falencia"),
+    ("Convolação em falência", "ato", r"\bconvolo(?![a-z])|\bconvoloem|convolando (a |em )?(presente )?(recuperacao|concordata)|convola-se|fica convolada|(julgo|declaro)[^.;\n]{0,80}convol"),
+    ("Decretação de falência", "ato", r"\bdecreto,? (hoje,? )?(a |sua |a sua )?(quebra|falencia)|declaro (aberta |a )+falencia|decreta-se a (quebra|falencia)|fica decretada a (quebra|falencia)|(julgo|declaro) procedente[^.;\n]{0,200}decret\w* (a |sua )?(quebra|falencia)|\bfixo,? (como |o )*termo legal"),
     ("Encerramento de falência", "ato", r"encerra\w* (da |a |o processo de )?falencia|falencia[^.;\n]{0,30}encerrada"),
     ("Pedido de falência", "ato", r"pedido de (auto)?falencia|requer\w* (a |sua )?(auto)?falencia|auto-?falencia"),
     ("Deferimento de recuperação judicial", "ato", r"defer\w* (o )?processamento d[ae] (pedido de )?recuperacao judicial|processamento da recuperacao judicial[^.;\n]{0,30}deferido"),
@@ -91,6 +106,9 @@ TIPOS_RE = [(nome, nivel, re.compile(p)) for nome, nivel, p in TIPOS]
 CLASSES_RELACIONADAS = re.compile(
     r"falencia|recuperacao judicial|recuperacao extrajudicial|autofalencia|habilitacao de credito|impugnacao de credito|classificacao de credito|insolvencia"
 )
+# Classes que não dizem nada sobre o assunto: a cautelar antecedente é a porta de
+# entrada comum de uma RJ, então valem como "sem classe" e o texto decide.
+CLASSES_NEUTRAS = re.compile(r"tutela (cautelar|antecipada) antecedente")
 # Sinais de que alguma das partes está em falência/recuperação/liquidação.
 MARCA_INSOLVENCIA = re.compile(r"massa falida|recuperand[ao]|em recuperacao (judicial|extrajudicial)|em liquidacao extrajudicial|\bfalid[ao]\b")
 CONTEXTO_INSOLVENCIA = re.compile(r"massa falida|falencia|falid[ao]|recuperacao judicial|recuperand[ao]|recuperacao extrajudicial|liquidacao extrajudicial")
@@ -106,7 +124,23 @@ def remover_ruido(norm: str) -> str:
     return norm
 
 
-def classificar(texto: str, classe: str = "", partes=None):
+def texto_classificavel(texto: str) -> str:
+    return remover_ruido(normalizar(texto))
+
+
+@functools.lru_cache(maxsize=512)
+def _buscas(norm: str):
+    """As buscas que só dependem do texto (a parte cara), guardadas porque o DJEN
+    repete o mesmo texto para cada destinatário com classe e partes diferentes."""
+    achados = []
+    for nome, nivel, rx in TIPOS_RE:
+        m = rx.search(norm)
+        if m:
+            achados.append((nome, nivel, m.start()))
+    return achados, bool(MARCA_INSOLVENCIA.search(norm)), bool(CONTEXTO_INSOLVENCIA.search(norm))
+
+
+def classificar(texto: str, classe: str = "", partes=None, norm: str = None):
     """Retorna (tipo_ato, relevancia, posicao_do_trecho).
 
     relevancia:
@@ -120,25 +154,27 @@ def classificar(texto: str, classe: str = "", partes=None):
     insolvência (execução, juizado, agravo...), a publicação é de outro processo
     que só cita a falência/RJ — no máximo "media", mesmo que mencione uma
     decretação ("aguarde-se o encerramento da falência", "o juízo X decretou...").
+
+    `norm` aceita o texto já passado por normalizar() e remover_ruido(), para não
+    refazer o trabalho em publicações grandes.
     """
-    norm = remover_ruido(normalizar(texto))
+    if norm is None:
+        norm = texto_classificavel(texto)
     classe_n = normalizar(classe or "")
     partes_n = normalizar(" ".join(partes or []))
     classe_rel = bool(CLASSES_RELACIONADAS.search(classe_n))
-    tem_classe = bool(classe_n.strip())
-    marca = bool(MARCA_INSOLVENCIA.search(norm) or MARCA_INSOLVENCIA.search(partes_n))
+    tem_classe = bool(classe_n.strip()) and not CLASSES_NEUTRAS.search(classe_n)
+    achados, marca_texto, contexto = _buscas(norm)
+    marca = marca_texto or bool(MARCA_INSOLVENCIA.search(partes_n))
 
-    for nome, nivel, rx in TIPOS_RE:
-        m = rx.search(norm)
-        if not m:
-            continue
-        if nome.startswith("Alienação") and not (classe_rel or CONTEXTO_INSOLVENCIA.search(norm)):
+    for nome, nivel, pos in achados:
+        if nome.startswith("Alienação") and not (classe_rel or contexto):
             continue
         if classe_rel or (nivel != "generico" and not tem_classe):
-            return nome, "alta", m.start()
+            return nome, "alta", pos
         if nivel != "generico" or marca:
-            return nome, "media", m.start()
-        return nome, "baixa", m.start()
+            return nome, "media", pos
+        return nome, "baixa", pos
 
     if classe_rel:
         tipo = "Outros atos – falência" if "falencia" in classe_n else "Outros atos – recuperação judicial"
@@ -149,8 +185,9 @@ def classificar(texto: str, classe: str = "", partes=None):
     return "", "baixa", -1
 
 
-def termos_encontrados(texto: str) -> str:
-    norm = remover_ruido(normalizar(texto))
+def termos_encontrados(texto: str, norm: str = None) -> str:
+    if norm is None:
+        norm = texto_classificavel(texto)
     return ", ".join(sorted({m.group(0) for m in TERMOS_REL.finditer(norm)}))
 
 
@@ -172,10 +209,11 @@ EMPRESA_SUFIXO_RE = re.compile(rf"(?:{PAL}(?:\s+|,\s*)(?:{CONECTOR}\s+)?){{1,11}
 
 # Onde um nome de empresa termina (o texto que vem depois já é outra coisa).
 FIM_NOME_RE = re.compile(
-    r"(?i)[,\s]+(?:cnpj|cpf|inscrit\w*|com sede|sediad\w*|nire|processo|autos|n[º°o]\.?\s|adv\b|advogad\w*|oab|representad\w*|por meio|nos termos|neste|nesta|vem|requer\w*|ajuiz\w*|em face|contra|ficam?|foi|que|onde|cujo|para|pelo|pela|e outr\w*|\(fls?)\b.*$"
+    r"(?i)[,\s]+(?:cnpj|cpf|inscrit\w*|com sede|sediad\w*|situad\w*|estabelecid\w*|rua|r(?=\.\s)|avenida|av(?=\.)|nire|processo|autos|n[º°o]\.?\s|adv\b|advogad\w*|oab|representad\w*|por meio|nos termos|neste|nesta|vem|requer\w*|ajuiz\w*|em face|contra|ficam?|foi|que|onde|cujo|para|pelo|pela|e outr\w*|\(fls?)\b.*$"
 )
 PALAVRAS_PROIBIDAS = re.compile(
-    r"(?i)\b(?:fal[eê]ncias?|microempresas?|pequeno porte|recupera[cç][aã]o|judicial|extrajudicial|vara|ju[ií]z\w*|processo|edital|autos|credores|decretad\w*|decreto|senten[cç]a|massa|falid[ao]|tribunal|comarca|foro|advogad\w*|cart[oó]rio|intima[cç][aã]o|assembleia|encerrad\w*|ficha)\b"
+    r"(?i)\b(?:fal[eê]ncias?|microempresas?|pequeno porte|recupera[cç][aã]o|judicial|extrajudicial|vara|ju[ií]z\w*|processo|edital|autos|credores|decretad\w*|decreto|senten[cç]a|massa|falid[ao]|tribunal|comarca|foro|advogad\w*|cart[oó]rio|intima[cç][aã]o|assembleia|encerrad\w*|ficha|assunto|valor|causa|estado|cep|bairro|endere[cç]o)\b"
+    r"|\d{5,}|/(?:AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)\b|,\s*EM$"  # números de processo, "CIDADE/UF", "CURITIBA, ..., EM"
 )
 ADMIN_NOME_RE = re.compile(r"(?i)administra\w*\s+(?:judicia\w*|de fal[eê]ncias)|\bAJ\b")
 LIXO_INICIAL = re.compile(r"^(?:[\d.\-/º°]+\s*[-–]?\s*|(?:a|o|as|os|da|do|de|das|dos|e|A|O|DA|DO|DE|E)\s+)+")

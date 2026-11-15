@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: rj-tjrj-tjpr
+expected_outcome: |
+  Roda o coletor só no DJEN, só com TJRJ e TJPR, só para 30/10/2026, e apresenta
+  apenas os registros de recuperação judicial (não falências), com empresa,
+  processo, vara e link, e o total encontrado.
