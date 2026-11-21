@@ -23,6 +23,15 @@ python scripts/coletar.py --saida falencias --tribunais TJSP,TJRJ --data-inicio 
 Instruções completas para o agente em [SKILL.md](SKILL.md); detalhes das APIs em
 [references/fontes.md](references/fontes.md). Casos de avaliação em `evals/`.
 
+## API e dados coletados
+
+- `api/servidor.py`: API somente leitura (Flask) sobre `falencias/anuncios_falencia.csv`,
+  com filtros, paginação, exportação em CSV e resumo. `pip install flask` e
+  `python api/servidor.py` (http://127.0.0.1:8000).
+- `falencias/`: planilha acumulada, os CSVs de cada execução e o
+  `coletar_agendado.cmd` usado no Agendador do Windows (os caminhos dele são
+  desta máquina; ajuste ao instalar em outra).
+
 ## Versões
 
 - **v1.1.0**: opção `--desde-ultima`; decretação/convolação só quando a própria
